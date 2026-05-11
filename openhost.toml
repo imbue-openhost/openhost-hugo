@@ -1,0 +1,50 @@
+[app]
+name = "hugo"
+version = "0.1.0"
+description = "Hugo — fast static-site generator with Markdown source. Authors edit Markdown + theme files in $OPENHOST_APP_DATA_DIR/site/ on the host filesystem; the container watches that directory with inotify and rebuilds the site on every change. Built output is served on https://hugo.<zone>/ via darkhttpd."
+
+[runtime.container]
+# Container port 8080 is darkhttpd serving the BUILT site
+# (the output of `hugo --destination /output/public/`).  No
+# auth-proxy because the site is public.
+#
+# An inotify watcher inside the container monitors the
+# persistent source directory and re-invokes hugo when any
+# .md, .toml, or theme file changes.  Operators see updates
+# within a few seconds of saving — no `oh app reload` or
+# container restart needed.
+image = "Dockerfile"
+port = 8080
+
+[routing]
+# Static-site = public by default.  Flip to public_paths = []
+# for owner-only "private intranet" mode.
+public_paths = ["/"]
+health_check = "/"
+
+[resources]
+# Hugo's build process is the resource peak: a sizable site
+# with many pages + assets can use 200-400 MiB of RAM during
+# the build.  Once built, darkhttpd uses ~5 MiB and the inotify
+# watcher uses ~5 MiB.  256 MiB gives comfortable headroom
+# for the build peak on small-to-medium sites.
+memory_mb = 256
+# Hugo's build is CPU-bound (Markdown parsing + template
+# rendering) but only runs when source changes.  500m is
+# generous for the rebuild burst; idle is ~0%.
+cpu_millicores = 500
+
+[data]
+# Persistent: $OPENHOST_APP_DATA_DIR/site/ holds the Hugo
+# project tree:
+#   config.toml or hugo.toml — site config
+#   content/                 — page markdown
+#   layouts/                 — Go templates (or empty if using
+#                              a theme)
+#   themes/                  — git-submodule themes
+#   static/                  — passthrough files (images, etc.)
+#   assets/                  — pipeline-processed assets
+#
+# Operators SSH in and use git/rsync/cp to populate this tree.
+# The inotify watcher rebuilds on every change.
+app_data = true
