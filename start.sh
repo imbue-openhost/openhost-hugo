@@ -174,7 +174,7 @@ echo "[start.sh] Starting inotify watcher on $SOURCE_DIR"
     # `oh app logs hugo`.
     echo "[watcher] watching $SOURCE_DIR for changes"
     inotifywait -m -r -q \
-        -e modify -e create -e delete -e move_to -e move_from \
+        -e modify -e create -e delete -e moved_to -e moved_from \
         --format '%T %w%f %e' --timefmt '%Y-%m-%dT%H:%M:%S' \
         "$SOURCE_DIR" | while read -r event; do
         # Debounce: 1 second of quiet after the LAST event in a
@@ -199,27 +199,56 @@ WATCHER_PID=$!
 # Supervision
 # -----------------------------------------------------------------
 #
-# If darkhttpd dies, the container goes down (OpenHost will
-# restart it).  If the watcher dies, we keep serving the last
-# good build but lose live-reload — log it loudly so the
-# operator notices.
+# The container's lifecycle is tied to darkhttpd, NOT the
+# watcher.  If darkhttpd dies, the container exits (OpenHost
+# restarts it).  If the watcher dies, we log noisily but
+# keep darkhttpd running so the existing built site stays
+# online — losing live-reload is annoying, but a watcher
+# crash is not a reason to take the public site down.
 trap 'kill -TERM "$DARKHTTPD_PID" "$WATCHER_PID" 2>/dev/null; wait' TERM INT
 
-set +e
-wait -n "$DARKHTTPD_PID" "$WATCHER_PID"
-EXIT_CODE=$?
-exited_pid=""
-for pid in "$DARKHTTPD_PID" "$WATCHER_PID"; do
-    if ! kill -0 "$pid" 2>/dev/null; then
-        exited_pid="$pid"
+# Loop: wait for any child to exit; if it's the watcher, log
+# it, restart it, and continue.  If it's darkhttpd, the loop
+# exits and the container terminates.
+while true; do
+    set +e
+    wait -n "$DARKHTTPD_PID" "$WATCHER_PID"
+    EXIT_CODE=$?
+    set -e
+
+    if ! kill -0 "$DARKHTTPD_PID" 2>/dev/null; then
+        # darkhttpd is gone — that's fatal for the container.
+        echo "[start.sh] darkhttpd exited (code=$EXIT_CODE); container will shut down"
         break
+    fi
+
+    if ! kill -0 "$WATCHER_PID" 2>/dev/null; then
+        echo "[start.sh] watcher exited (code=$EXIT_CODE); restarting" >&2
+        (
+            echo "[watcher] watching $SOURCE_DIR for changes (restarted)"
+            inotifywait -m -r -q \
+                -e modify -e create -e delete -e moved_to -e moved_from \
+                --format '%T %w%f %e' --timefmt '%Y-%m-%dT%H:%M:%S' \
+                "$SOURCE_DIR" | while read -r event; do
+                last_event="$event"
+                while read -r -t 1 next_event; do
+                    last_event="$next_event"
+                done
+                echo "[watcher] change detected; rebuilding (last event: $last_event)"
+                if /opt/openhost-hugo/rebuild.sh; then
+                    echo "[watcher] rebuild OK"
+                else
+                    echo "[watcher] rebuild FAILED; previous output dir kept"
+                fi
+            done
+        ) &
+        WATCHER_PID=$!
+        # Brief sleep so a tight-loop watcher crash doesn't fork-storm.
+        sleep 2
+        continue
     fi
 done
 
-if [[ "$exited_pid" == "$WATCHER_PID" ]]; then
-    echo "[start.sh] watcher died; site will no longer rebuild on changes" >&2
-fi
-echo "[start.sh] Child exited (code=$EXIT_CODE); shutting down"
 kill -TERM "$DARKHTTPD_PID" "$WATCHER_PID" 2>/dev/null || true
 wait || true
 exit "$EXIT_CODE"
