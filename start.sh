@@ -140,11 +140,23 @@ fi
 # Same flags as openhost-darkhttpd: chroot, drop privilege,
 # no directory listings, log to stderr.
 echo "[start.sh] Starting darkhttpd on 0.0.0.0:8080 -> $OUTPUT_DIR"
+# NOTE: we deliberately do NOT pass --chroot here, even though
+# openhost-darkhttpd does.  Reason: rebuild.sh atomically swaps
+# $OUTPUT_DIR by renaming a fresh staging dir onto the path.
+# Once darkhttpd has chroot()'d into the OLD inode, the swap
+# is invisible to it (chroot binds to the inode, not the path),
+# so the SPA would freeze on the placeholder forever.  Without
+# --chroot, darkhttpd re-resolves $OUTPUT_DIR on every request
+# and picks up the new dir cleanly.
+#
+# We still --no-listing and drop privilege via --uid/--gid for
+# defense in depth.  The build output is already public by
+# design, so the small loss of filesystem-isolation is
+# acceptable trade for live-reload working at all.
 darkhttpd "$OUTPUT_DIR" \
     --port 8080 \
     --addr 0.0.0.0 \
     --no-listing \
-    --chroot \
     --uid nobody \
     --gid nobody \
     --log /dev/stderr &
